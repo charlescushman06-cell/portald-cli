@@ -1,0 +1,33 @@
+{
+  "name": "portald",
+  "version": "0.1.0",
+  "description": "CLI to add Portald agent authorization to your project",
+  "main": "dist/index.js",
+  "bin": {
+    "portald": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["portald", "ai", "agents", "authorization", "approval"],
+  "author": "Charles Cushman",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^14.0.0",
+    "fs-extra": "^11.3.0",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^22.15.21",
+    "@types/prompts": "^2.4.9",
+    "typescript": "^5.9.2"
+  }
+}
