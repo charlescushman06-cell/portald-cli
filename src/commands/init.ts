@@ -112,9 +112,9 @@ export async function init(options: InitOptions) {
     embed_modes: ["headless"],
     requested_capabilities: ["payment", "sensitive_action"],
     agent_instructions: {
-      handshake_endpoint: "https://portald.ai/api/portald/v1/identity/handshake",
-      action_ingest_endpoint: "https://portald.ai/api/agent-actions/ingest",
-      action_poll_endpoint: "https://portald.ai/api/agent-actions/{action_id}",
+      handshake_endpoint: "https://www.portald.ai/api/portald/v1/identity/handshake",
+      action_ingest_endpoint: "https://www.portald.ai/api/agent-actions/ingest",
+      action_poll_endpoint: "https://www.portald.ai/api/agent-actions/{action_id}",
       approvals_dashboard_url: "https://portald.ai/dashboard/approvals",
       enrollment_url: "https://portald.ai/enroll",
       notes: [
@@ -129,20 +129,25 @@ export async function init(options: InitOptions) {
   await fs.writeJSON(manifestPath, manifest, { spaces: 2 });
   console.log(chalk.green(`✓ Created ${manifestPath}`));
 
-  // 2. Create webhook handler (framework-specific)
+  // 2. Create webhook handler (framework-specific) with signature verification
   if (framework === "nextjs") {
     const isApp = isAppRouter();
     if (isApp) {
       // App Router
       const webhookCode = `import { NextRequest, NextResponse } from "next/server";
+import { createPortaldClient } from "portald/sdk";
 
 /**
  * Portald Webhook Handler
  * 
  * This endpoint receives callbacks from Portald when agent actions are approved/denied.
- * Register this URL in your Portald dashboard or include it in action requests.
+ * All webhooks are signed with HMAC - verify signatures to prevent spoofing.
  * 
  * URL: https://${domain}/api/portald/webhook
+ * 
+ * Required env vars:
+ *   PORTALD_SITE_ID - Your site ID from Portald dashboard
+ *   PORTALD_WEBHOOK_SECRET - Your webhook secret (keep secure!)
  */
 
 interface WebhookPayload {
@@ -154,30 +159,47 @@ interface WebhookPayload {
   reason?: string;
   payment_intent_id?: string;
   payment_error?: string;
-  mediation_payload?: Record<string, unknown>;
+  amount_cents?: number;
 }
 
 export async function POST(req: NextRequest) {
-  const body = (await req.json()) as WebhookPayload;
+  // Get raw body for signature verification
+  const rawBody = await req.text();
+  const timestamp = req.headers.get("x-portald-timestamp") ?? "";
+  const signature = req.headers.get("x-portald-signature") ?? "";
 
+  // Verify webhook signature (prevents spoofing)
+  const portald = createPortaldClient();
+  if (!portald.verifyWebhookSignature(rawBody, timestamp, signature)) {
+    console.error("[Portald Webhook] Invalid signature - possible spoofing attempt");
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  const body = JSON.parse(rawBody) as WebhookPayload;
   console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
 
   // Handle the action based on type and status
   if (body.status === "executed") {
-    // Payment was successful - fulfill the order
+    // Payment was successful - fulfill the order!
     switch (body.action_type) {
       case "purchase":
         // TODO: Fulfill the purchase
         // - Look up order by action_id
         // - Mark as paid
         // - Trigger shipping/delivery
-        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        console.log(\`Purchase executed: \${body.action_id}\`);
+        console.log(\`  Amount: $\${(body.amount_cents ?? 0) / 100}\`);
+        console.log(\`  Payment: \${body.payment_intent_id}\`);
+        
+        // IMPORTANT: Verify payment with Portald for high-value orders
+        // const verification = await portald.verifyPayment(body.action_id);
+        // if (!verification.verified) { /* handle error */ }
         break;
       default:
         console.log(\`Action executed: \${body.action_type}\`);
     }
   } else if (body.status === "approved") {
-    // Action approved but may not involve payment
+    // Action approved (non-payment actions)
     console.log(\`Action approved: \${body.action_id}\`);
   } else if (body.status === "denied") {
     // User denied the action
@@ -197,15 +219,25 @@ export async function POST(req: NextRequest) {
     } else {
       // Pages Router
       const webhookCode = `import type { NextApiRequest, NextApiResponse } from "next";
+import { createPortaldClient } from "portald/sdk";
 
 /**
  * Portald Webhook Handler
  * 
  * This endpoint receives callbacks from Portald when agent actions are approved/denied.
- * Register this URL in your Portald dashboard or include it in action requests.
+ * All webhooks are signed with HMAC - verify signatures to prevent spoofing.
  * 
  * URL: https://${domain}/api/portald/webhook
+ * 
+ * Required env vars:
+ *   PORTALD_SITE_ID - Your site ID from Portald dashboard
+ *   PORTALD_WEBHOOK_SECRET - Your webhook secret (keep secure!)
  */
+
+// Disable body parsing to get raw body for signature verification
+export const config = {
+  api: { bodyParser: false },
+};
 
 interface WebhookPayload {
   event: "action.decided";
@@ -216,7 +248,15 @@ interface WebhookPayload {
   reason?: string;
   payment_intent_id?: string;
   payment_error?: string;
-  mediation_payload?: Record<string, unknown>;
+  amount_cents?: number;
+}
+
+async function getRawBody(req: NextApiRequest): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -224,32 +264,38 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const body = req.body as WebhookPayload;
+  // Get raw body for signature verification
+  const rawBody = await getRawBody(req);
+  const timestamp = (req.headers["x-portald-timestamp"] as string) ?? "";
+  const signature = (req.headers["x-portald-signature"] as string) ?? "";
 
+  // Verify webhook signature (prevents spoofing)
+  const portald = createPortaldClient();
+  if (!portald.verifyWebhookSignature(rawBody, timestamp, signature)) {
+    console.error("[Portald Webhook] Invalid signature - possible spoofing attempt");
+    return res.status(401).json({ error: "Invalid signature" });
+  }
+
+  const body = JSON.parse(rawBody) as WebhookPayload;
   console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
 
   // Handle the action based on type and status
   if (body.status === "executed") {
-    // Payment was successful - fulfill the order
+    // Payment was successful - fulfill the order!
     switch (body.action_type) {
       case "purchase":
-        // TODO: Fulfill the purchase
-        // - Look up order by action_id
-        // - Mark as paid
-        // - Trigger shipping/delivery
-        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        console.log(\`Purchase executed: \${body.action_id}\`);
+        console.log(\`  Amount: $\${(body.amount_cents ?? 0) / 100}\`);
+        console.log(\`  Payment: \${body.payment_intent_id}\`);
         break;
       default:
         console.log(\`Action executed: \${body.action_type}\`);
     }
   } else if (body.status === "approved") {
-    // Action approved but may not involve payment
     console.log(\`Action approved: \${body.action_id}\`);
   } else if (body.status === "denied") {
-    // User denied the action
     console.log(\`Action denied: \${body.action_id}, reason: \${body.reason}\`);
   } else if (body.status === "failed") {
-    // Payment or execution failed
     console.log(\`Action failed: \${body.action_id}, error: \${body.payment_error}\`);
   }
 
@@ -263,14 +309,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
   } else if (framework === "express") {
     const routeCode = `import { Router, Request, Response } from "express";
+import { createPortaldClient } from "portald/sdk";
 
 /**
  * Portald Webhook Handler
  * 
  * Mount this router: app.use("/api/portald", portaldRouter);
+ * IMPORTANT: Use express.raw() middleware for this route to get raw body.
  * 
- * This endpoint receives callbacks from Portald when agent actions are approved/denied.
  * URL: https://${domain}/api/portald/webhook
+ * 
+ * Required env vars:
+ *   PORTALD_SITE_ID - Your site ID from Portald dashboard
+ *   PORTALD_WEBHOOK_SECRET - Your webhook secret (keep secure!)
  */
 
 interface WebhookPayload {
@@ -282,23 +333,34 @@ interface WebhookPayload {
   reason?: string;
   payment_intent_id?: string;
   payment_error?: string;
-  mediation_payload?: Record<string, unknown>;
+  amount_cents?: number;
 }
 
 const router = Router();
 
-router.post("/webhook", async (req: Request, res: Response) => {
-  const body = req.body as WebhookPayload;
+// Use raw body parser for signature verification
+router.post("/webhook", (req: Request, res: Response) => {
+  const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+  const timestamp = (req.headers["x-portald-timestamp"] as string) ?? "";
+  const signature = (req.headers["x-portald-signature"] as string) ?? "";
 
+  // Verify webhook signature (prevents spoofing)
+  const portald = createPortaldClient();
+  if (!portald.verifyWebhookSignature(rawBody, timestamp, signature)) {
+    console.error("[Portald Webhook] Invalid signature - possible spoofing attempt");
+    return res.status(401).json({ error: "Invalid signature" });
+  }
+
+  const body = JSON.parse(rawBody) as WebhookPayload;
   console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
 
   // Handle the action based on type and status
   if (body.status === "executed") {
-    // Payment was successful - fulfill the order
     switch (body.action_type) {
       case "purchase":
-        // TODO: Fulfill the purchase
-        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        console.log(\`Purchase executed: \${body.action_id}\`);
+        console.log(\`  Amount: $\${(body.amount_cents ?? 0) / 100}\`);
+        console.log(\`  Payment: \${body.payment_intent_id}\`);
         break;
       default:
         console.log(\`Action executed: \${body.action_type}\`);
@@ -322,6 +384,20 @@ export default router;
     console.log(chalk.green(`✓ Created ${routePath}`));
   }
 
+  // 3. Create .env.example with required variables
+  const envExample = `# Portald Configuration
+# Get these values from https://portald.ai/dashboard after registering your site
+
+PORTALD_SITE_ID=your_site_id_here
+PORTALD_WEBHOOK_SECRET=your_webhook_secret_here
+`;
+  
+  const envPath = ".env.example";
+  if (!fs.existsSync(envPath)) {
+    await fs.writeFile(envPath, envExample);
+    console.log(chalk.green(`✓ Created ${envPath}`));
+  }
+
   // Summary
   console.log(chalk.bold("\n✨ Portald initialized!\n"));
   console.log(chalk.white("Your site is now Portald-enabled. Here's what was created:\n"));
@@ -332,18 +408,23 @@ export default router;
   
   console.log(chalk.cyan("  🔔 Webhook Handler"));
   console.log(chalk.dim(`     https://${domain}/api/portald/webhook`));
-  console.log(chalk.dim("     Receives notifications when actions are approved/executed.\n"));
+  console.log(chalk.dim("     Receives signed notifications when actions are approved/executed.\n"));
+
+  console.log(chalk.cyan("  🔐 Environment Variables"));
+  console.log(chalk.dim("     PORTALD_SITE_ID - Your site ID"));
+  console.log(chalk.dim("     PORTALD_WEBHOOK_SECRET - For verifying webhook signatures\n"));
 
   console.log(chalk.white("How it works:\n"));
   console.log(chalk.dim("  1. An AI agent discovers your site supports Portald (via manifest)"));
   console.log(chalk.dim("  2. Agent submits purchase/action requests through Portald"));
   console.log(chalk.dim("  3. User approves the action in their Portald dashboard"));
-  console.log(chalk.dim("  4. Portald executes payment and notifies your webhook"));
-  console.log(chalk.dim("  5. Your webhook handler fulfills the order\n"));
+  console.log(chalk.dim("  4. Portald executes payment and sends signed webhook to your server"));
+  console.log(chalk.dim("  5. Your webhook handler verifies signature and fulfills the order\n"));
 
   console.log(chalk.white("Next steps:\n"));
-  console.log(chalk.dim("  1. Deploy your site with the manifest at /.well-known/portald-manifest.json"));
-  console.log(chalk.dim("  2. Implement fulfillment logic in your webhook handler"));
-  console.log(chalk.dim("  3. (Optional) Set up Stripe Connect to receive funds directly"));
-  console.log(chalk.dim("     → https://portald.ai/docs/merchant-setup\n"));
+  console.log(chalk.yellow("  1. Register your site at https://portald.ai/merchant"));
+  console.log(chalk.dim("     → You'll get PORTALD_SITE_ID and PORTALD_WEBHOOK_SECRET"));
+  console.log(chalk.yellow("  2. Add the env vars to your deployment"));
+  console.log(chalk.yellow("  3. Deploy with the manifest at /.well-known/portald-manifest.json"));
+  console.log(chalk.yellow("  4. Implement fulfillment logic in your webhook handler\n"));
 }
