@@ -3,538 +3,347 @@ import chalk from "chalk";
 import fs from "fs-extra";
 import path from "path";
 
-type InitOptions = {
-  yes?: boolean;
-  framework?: string;
-};
-
 type Framework = "nextjs" | "express" | "generic";
 
-const FRAMEWORKS: { title: string; value: Framework }[] = [
-  { title: "Next.js (App Router)", value: "nextjs" },
-  { title: "Express.js", value: "express" },
-  { title: "Generic (just the SDK)", value: "generic" },
-];
+interface InitOptions {
+  yes?: boolean;
+  framework?: Framework;
+}
+
+function detectFramework(): Framework | null {
+  if (fs.existsSync("next.config.js") || fs.existsSync("next.config.ts") || fs.existsSync("next.config.mjs")) {
+    return "nextjs";
+  }
+  const pkg = fs.existsSync("package.json") ? fs.readJSONSync("package.json") : {};
+  if (pkg.dependencies?.express) {
+    return "express";
+  }
+  return null;
+}
+
+function getPublicDir(framework: Framework): string {
+  if (framework === "nextjs") return "public";
+  if (framework === "express") return "public";
+  return ".";
+}
+
+function getApiDir(framework: Framework): string {
+  // Check for app router vs pages router in Next.js
+  if (framework === "nextjs") {
+    if (fs.existsSync("src/app")) return "src/app/api/portald";
+    if (fs.existsSync("app")) return "app/api/portald";
+    if (fs.existsSync("src/pages")) return "src/pages/api/portald";
+    return "pages/api/portald";
+  }
+  if (framework === "express") return "src/routes";
+  return "api";
+}
+
+function isAppRouter(): boolean {
+  return fs.existsSync("src/app") || fs.existsSync("app");
+}
 
 export async function init(options: InitOptions) {
-  console.log(chalk.bold("\n🚀 Portald Setup\n"));
+  console.log(chalk.bold("\n🚀 Portald CLI - Initialize\n"));
 
-  // Detect framework
-  let framework: Framework = options.framework as Framework;
-  if (!framework) {
-    if (options.yes) {
-      framework = detectFramework();
-    } else {
-      const response = await prompts({
-        type: "select",
-        name: "framework",
-        message: "What framework are you using?",
-        choices: FRAMEWORKS,
-        initial: FRAMEWORKS.findIndex((f) => f.value === detectFramework()),
-      });
-      framework = response.framework;
-    }
+  let framework = options.framework as Framework | undefined;
+  let appName = "";
+  let domain = "";
+
+  const detected = detectFramework();
+  if (detected && !framework) {
+    console.log(chalk.dim(`Detected framework: ${detected}`));
+    framework = detected;
   }
-
-  if (!framework) {
-    console.log(chalk.red("Setup cancelled."));
-    return;
-  }
-
-  // Get project details
-  let appName = path.basename(process.cwd());
-  let domain = "localhost:3000";
-  let siteId = appName.toLowerCase().replace(/[^a-z0-9]/g, "-");
 
   if (!options.yes) {
-    const details = await prompts([
+    const responses = await prompts([
+      {
+        type: framework ? null : "select",
+        name: "framework",
+        message: "What framework are you using?",
+        choices: [
+          { title: "Next.js", value: "nextjs" },
+          { title: "Express", value: "express" },
+          { title: "Generic / Other", value: "generic" },
+        ],
+      },
       {
         type: "text",
         name: "appName",
-        message: "App name",
-        initial: appName,
+        message: "App name (for manifest)?",
+        initial: path.basename(process.cwd()),
       },
       {
         type: "text",
         name: "domain",
-        message: "Domain (for production)",
-        initial: "yoursite.com",
-      },
-      {
-        type: "text",
-        name: "siteId",
-        message: "Site ID (unique identifier)",
-        initial: siteId,
+        message: "Production domain (e.g., example.com)?",
+        initial: "localhost:3000",
       },
     ]);
-    appName = details.appName || appName;
-    domain = details.domain || domain;
-    siteId = details.siteId || siteId;
+
+    framework = responses.framework || framework;
+    appName = responses.appName || path.basename(process.cwd());
+    domain = responses.domain || "localhost:3000";
+  } else {
+    framework = framework || detected || "generic";
+    appName = path.basename(process.cwd());
+    domain = "localhost:3000";
   }
 
-  // Get example actions
-  let exampleActions = ["payments.charge", "orders.create", "data.export"];
-  if (!options.yes) {
-    const actionsResponse = await prompts({
-      type: "list",
-      name: "actions",
-      message: "Example action types (comma-separated)",
-      initial: exampleActions.join(", "),
-      separator: ",",
-    });
-    if (actionsResponse.actions?.length) {
-      exampleActions = actionsResponse.actions.map((a: string) => a.trim());
-    }
+  if (!framework) {
+    console.log(chalk.red("No framework selected. Exiting."));
+    process.exit(1);
   }
 
-  console.log(chalk.dim("\nCreating files...\n"));
-
-  // Create files based on framework
-  switch (framework) {
-    case "nextjs":
-      await createNextJsFiles({ appName, domain, siteId, exampleActions });
-      break;
-    case "express":
-      await createExpressFiles({ appName, domain, siteId, exampleActions });
-      break;
-    case "generic":
-      await createGenericFiles({ appName, domain, siteId, exampleActions });
-      break;
-  }
-
-  // Print success message
-  console.log(chalk.green("\n✅ Portald initialized!\n"));
-  console.log(chalk.bold("Next steps:"));
-  console.log("  1. Review the generated files");
-  console.log("  2. Update your environment variables:");
-  console.log(chalk.dim("     PORTALD_SITE_ID=" + siteId));
-  console.log("  3. Deploy and test with an agent\n");
-  console.log(chalk.dim("Docs: https://portald.ai/docs\n"));
-}
-
-function detectFramework(): Framework {
-  if (fs.existsSync("next.config.js") || fs.existsSync("next.config.ts") || fs.existsSync("next.config.mjs")) {
-    return "nextjs";
-  }
-  try {
-    const pkg = fs.readJsonSync("package.json");
-    if (pkg.dependencies?.express) return "express";
-    if (pkg.dependencies?.next) return "nextjs";
-  } catch {}
-  return "generic";
-}
-
-type ProjectConfig = {
-  appName: string;
-  domain: string;
-  siteId: string;
-  exampleActions: string[];
-};
-
-async function createNextJsFiles(config: ProjectConfig) {
-  const { appName, domain, siteId, exampleActions } = config;
-
-  // Create .well-known directory
-  const wellKnownDir = "public/.well-known";
-  await fs.ensureDir(wellKnownDir);
-
-  // Create manifest
-  const manifest = createManifest(config);
-  await fs.writeJson(path.join(wellKnownDir, "portald-manifest.json"), manifest, { spaces: 2 });
-  console.log(chalk.green("  ✓") + " public/.well-known/portald-manifest.json");
-
-  // Create API routes
-  const apiDir = "src/app/api/portald";
-  await fs.ensureDir(apiDir);
-  await fs.ensureDir(path.join(apiDir, "handshake"));
-  await fs.ensureDir(path.join(apiDir, "actions"));
-  await fs.ensureDir(path.join(apiDir, "actions/[id]"));
-
-  // Handshake route
-  await fs.writeFile(
-    path.join(apiDir, "handshake/route.ts"),
-    getNextJsHandshakeRoute()
-  );
-  console.log(chalk.green("  ✓") + " src/app/api/portald/handshake/route.ts");
-
-  // Actions ingest route
-  await fs.writeFile(
-    path.join(apiDir, "actions/route.ts"),
-    getNextJsActionsRoute()
-  );
-  console.log(chalk.green("  ✓") + " src/app/api/portald/actions/route.ts");
-
-  // Actions poll route
-  await fs.writeFile(
-    path.join(apiDir, "actions/[id]/route.ts"),
-    getNextJsActionPollRoute()
-  );
-  console.log(chalk.green("  ✓") + " src/app/api/portald/actions/[id]/route.ts");
-
-  // Create lib files
-  const libDir = "src/lib/portald";
-  await fs.ensureDir(libDir);
-
-  await fs.writeFile(path.join(libDir, "client.ts"), getPortaldClient());
-  console.log(chalk.green("  ✓") + " src/lib/portald/client.ts");
-
-  await fs.writeFile(path.join(libDir, "gate.ts"), getGateWrapper(exampleActions));
-  console.log(chalk.green("  ✓") + " src/lib/portald/gate.ts");
-
-  // Create example usage file
-  await fs.writeFile(path.join(libDir, "example.ts"), getExampleUsage(exampleActions));
-  console.log(chalk.green("  ✓") + " src/lib/portald/example.ts");
-}
-
-async function createExpressFiles(config: ProjectConfig) {
-  const { appName, domain, siteId, exampleActions } = config;
+  const publicDir = getPublicDir(framework);
+  const apiDir = getApiDir(framework);
+  const wellKnownDir = path.join(publicDir, ".well-known");
 
   // Create directories
-  await fs.ensureDir("public/.well-known");
-  await fs.ensureDir("src/portald");
+  await fs.ensureDir(wellKnownDir);
+  await fs.ensureDir(apiDir);
 
-  // Create manifest
-  const manifest = createManifest(config);
-  await fs.writeJson("public/.well-known/portald-manifest.json", manifest, { spaces: 2 });
-  console.log(chalk.green("  ✓") + " public/.well-known/portald-manifest.json");
-
-  // Create Express routes
-  await fs.writeFile("src/portald/routes.ts", getExpressRoutes());
-  console.log(chalk.green("  ✓") + " src/portald/routes.ts");
-
-  // Create client
-  await fs.writeFile("src/portald/client.ts", getPortaldClient());
-  console.log(chalk.green("  ✓") + " src/portald/client.ts");
-
-  // Create gate wrapper
-  await fs.writeFile("src/portald/gate.ts", getGateWrapper(exampleActions));
-  console.log(chalk.green("  ✓") + " src/portald/gate.ts");
-
-  console.log(chalk.yellow("\n  Add to your Express app:"));
-  console.log(chalk.dim('  import { portaldRoutes } from "./portald/routes";'));
-  console.log(chalk.dim('  app.use("/api/portald", portaldRoutes);'));
-}
-
-async function createGenericFiles(config: ProjectConfig) {
-  const { appName, domain, siteId, exampleActions } = config;
-
-  await fs.ensureDir("portald");
-
-  // Create manifest
-  const manifest = createManifest(config);
-  await fs.writeJson("portald/manifest.json", manifest, { spaces: 2 });
-  console.log(chalk.green("  ✓") + " portald/manifest.json");
-
-  // Create client
-  await fs.writeFile("portald/client.ts", getPortaldClient());
-  console.log(chalk.green("  ✓") + " portald/client.ts");
-
-  // Create gate wrapper
-  await fs.writeFile("portald/gate.ts", getGateWrapper(exampleActions));
-  console.log(chalk.green("  ✓") + " portald/gate.ts");
-
-  console.log(chalk.yellow("\n  Serve the manifest at: /.well-known/portald-manifest.json"));
-}
-
-function createManifest(config: ProjectConfig) {
-  const { appName, domain, siteId, exampleActions } = config;
-  
-  return {
-    portald: { version: "1" },
-    site_id: siteId,
-    domain: domain,
+  // 1. Create manifest - tells agents how to interact with this site
+  const manifest = {
+    domain,
     app_name: appName,
-    description: `${appName} with Portald agent authorization. Agents can request actions with user approval.`,
+    portald: { version: "1.0" },
+    embed_modes: ["headless"],
+    requested_capabilities: ["payment", "sensitive_action"],
     agent_instructions: {
-      summary: `This site uses Portald for agent authorization. Actions require user approval.`,
-      handshake_endpoint: `https://${domain}/api/portald/handshake`,
-      action_ingest_endpoint: `https://${domain}/api/portald/actions`,
-      action_poll_endpoint: `https://${domain}/api/portald/actions/{action_id}`,
-      flow: [
-        "1. Call handshake with your action_code to get session token",
-        "2. Submit actions via the ingest endpoint",
-        "3. Low-risk actions auto-approve; med/high require user approval",
-        "4. Poll action status or wait for webhook callback",
+      handshake_endpoint: "https://portald.ai/api/portald/v1/identity/handshake",
+      action_ingest_endpoint: "https://portald.ai/api/agent-actions/ingest",
+      action_poll_endpoint: "https://portald.ai/api/agent-actions/{action_id}",
+      approvals_dashboard_url: "https://portald.ai/dashboard/approvals",
+      enrollment_url: "https://portald.ai/enroll",
+      notes: [
+        "Submit actions via action_ingest_endpoint with Bearer token",
+        "Poll action status or use callback_url for webhooks",
+        "Low risk actions auto-approve, med/high require human approval",
       ],
     },
-    available_actions: exampleActions.map((action, i) => ({
-      action_type: action,
-      description: `${action.replace(".", " ")} action`,
-      risk_level: i === 0 ? "high" : i === 1 ? "med" : "low",
-      payload_schema: {},
-    })),
   };
-}
 
-function getNextJsHandshakeRoute() {
-  return `import { NextRequest, NextResponse } from "next/server";
-import { portaldClient } from "@/lib/portald/client";
+  const manifestPath = path.join(wellKnownDir, "portald-manifest.json");
+  await fs.writeJSON(manifestPath, manifest, { spaces: 2 });
+  console.log(chalk.green(`✓ Created ${manifestPath}`));
 
-export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}));
-  const { action_code } = body;
-
-  if (!action_code) {
-    return NextResponse.json({ error: "Missing action_code" }, { status: 400 });
-  }
-
-  try {
-    const result = await portaldClient.handshake(action_code);
-    return NextResponse.json(result);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 401 });
-  }
-}
-`;
-}
-
-function getNextJsActionsRoute() {
-  return `import { NextRequest, NextResponse } from "next/server";
-import { portaldClient } from "@/lib/portald/client";
-
-export async function POST(req: NextRequest) {
-  const token = req.headers.get("authorization")?.replace("Bearer ", "");
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const body = await req.json().catch(() => ({}));
-  
-  try {
-    const result = await portaldClient.ingestAction(token, body);
-    return NextResponse.json(result);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
-  }
-}
-`;
-}
-
-function getNextJsActionPollRoute() {
-  return `import { NextRequest, NextResponse } from "next/server";
-import { portaldClient } from "@/lib/portald/client";
-
-export async function GET(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const { id } = await params;
-  const token = req.headers.get("authorization")?.replace("Bearer ", "");
-  
-  if (!token) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  try {
-    const result = await portaldClient.getAction(token, id);
-    return NextResponse.json(result);
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 400 });
-  }
-}
-`;
-}
-
-function getPortaldClient() {
-  return `const PORTALD_API = process.env.PORTALD_API_URL ?? "https://portald.ai";
-
-class PortaldClient {
-  async handshake(actionCode: string) {
-    const res = await fetch(\`\${PORTALD_API}/api/portald/v1/identity/handshake\`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action_code: actionCode }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "Handshake failed");
-    return data;
-  }
-
-  async ingestAction(sessionToken: string, action: {
-    action_type: string;
-    action_payload: Record<string, unknown>;
-    risk_level?: "low" | "med" | "high";
-    idempotency_key: string;
-    callback_url?: string;
-  }) {
-    const res = await fetch(\`\${PORTALD_API}/api/agent-actions/ingest\`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": \`Bearer \${sessionToken}\`,
-      },
-      body: JSON.stringify(action),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "Action ingest failed");
-    return data;
-  }
-
-  async getAction(sessionToken: string, actionId: string) {
-    const res = await fetch(\`\${PORTALD_API}/api/agent-actions/\${actionId}\`, {
-      headers: { "Authorization": \`Bearer \${sessionToken}\` },
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? "Failed to get action");
-    return data;
-  }
-
-  async waitForApproval(sessionToken: string, actionId: string, timeoutMs = 300000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const action = await this.getAction(sessionToken, actionId);
-      if (action.status === "approved") return { approved: true, action };
-      if (action.status === "denied") return { approved: false, action };
-      if (action.status === "expired") return { approved: false, action };
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    throw new Error("Approval timeout");
-  }
-}
-
-export const portaldClient = new PortaldClient();
-`;
-}
-
-function getGateWrapper(exampleActions: string[]) {
-  return `import { portaldClient } from "./client";
-import { randomUUID } from "crypto";
-
-type GateOptions = {
-  actionType: string;
-  riskLevel?: "low" | "med" | "high";
-  getPayload?: (...args: any[]) => Record<string, unknown>;
-};
+  // 2. Create webhook handler (framework-specific)
+  if (framework === "nextjs") {
+    const isApp = isAppRouter();
+    if (isApp) {
+      // App Router
+      const webhookCode = `import { NextRequest, NextResponse } from "next/server";
 
 /**
- * Wrap a function to require Portald approval before execution.
+ * Portald Webhook Handler
  * 
- * @example
- * const gatedCharge = gate(chargeCustomer, {
- *   actionType: "payments.charge",
- *   riskLevel: "high",
- *   getPayload: (customerId, amount) => ({ customerId, amount }),
- * });
+ * This endpoint receives callbacks from Portald when agent actions are approved/denied.
+ * Register this URL in your Portald dashboard or include it in action requests.
  * 
- * // In your agent handler:
- * const result = await gatedCharge(sessionToken, customerId, 100);
+ * URL: https://${domain}/api/portald/webhook
  */
-export function gate<T extends (...args: any[]) => any>(
-  fn: T,
-  options: GateOptions
-): (sessionToken: string, ...args: Parameters<T>) => Promise<ReturnType<T>> {
-  return async (sessionToken: string, ...args: Parameters<T>) => {
-    const payload = options.getPayload
-      ? options.getPayload(...args)
-      : { args };
 
-    // Submit action for approval
-    const action = await portaldClient.ingestAction(sessionToken, {
-      action_type: options.actionType,
-      action_payload: payload,
-      risk_level: options.riskLevel ?? "med",
-      idempotency_key: randomUUID(),
-    });
-
-    // If auto-approved (low risk), execute immediately
-    if (action.approved) {
-      return fn(...args);
-    }
-
-    // Wait for approval
-    const result = await portaldClient.waitForApproval(sessionToken, action.action_id);
-    
-    if (!result.approved) {
-      throw new Error(\`Action \${options.actionType} was denied\`);
-    }
-
-    // Execute the function
-    return fn(...args);
-  };
+interface WebhookPayload {
+  event: "action.decided";
+  action_id: string;
+  status: "approved" | "denied" | "executed" | "failed";
+  action_type: string;
+  decided_at: string;
+  reason?: string;
+  payment_intent_id?: string;
+  payment_error?: string;
+  mediation_payload?: Record<string, unknown>;
 }
 
-// Example: Quick gate for common patterns
-export const gatePayment = <T extends (...args: any[]) => any>(fn: T, actionType = "payments.charge") =>
-  gate(fn, { actionType, riskLevel: "high" });
+export async function POST(req: NextRequest) {
+  const body = (await req.json()) as WebhookPayload;
 
-export const gateData = <T extends (...args: any[]) => any>(fn: T, actionType = "data.modify") =>
-  gate(fn, { actionType, riskLevel: "med" });
+  console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
+
+  // Handle the action based on type and status
+  if (body.status === "executed") {
+    // Payment was successful - fulfill the order
+    switch (body.action_type) {
+      case "purchase":
+        // TODO: Fulfill the purchase
+        // - Look up order by action_id
+        // - Mark as paid
+        // - Trigger shipping/delivery
+        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        break;
+      default:
+        console.log(\`Action executed: \${body.action_type}\`);
+    }
+  } else if (body.status === "approved") {
+    // Action approved but may not involve payment
+    console.log(\`Action approved: \${body.action_id}\`);
+  } else if (body.status === "denied") {
+    // User denied the action
+    console.log(\`Action denied: \${body.action_id}, reason: \${body.reason}\`);
+  } else if (body.status === "failed") {
+    // Payment or execution failed
+    console.log(\`Action failed: \${body.action_id}, error: \${body.payment_error}\`);
+  }
+
+  return NextResponse.json({ received: true });
+}
 `;
-}
-
-function getExampleUsage(exampleActions: string[]) {
-  const action = exampleActions[0] ?? "payments.charge";
-  return `/**
- * Example: Wrapping a function with Portald approval
- */
-import { gate } from "./gate";
-
-// Your original function
-async function chargeCustomer(customerId: string, amountCents: number) {
-  // ... your payment logic
-  console.log(\`Charging \${customerId} for \${amountCents} cents\`);
-  return { success: true, chargeId: "ch_123" };
-}
-
-// Wrap it with Portald
-export const gatedChargeCustomer = gate(chargeCustomer, {
-  actionType: "${action}",
-  riskLevel: "high",
-  getPayload: (customerId, amountCents) => ({ customerId, amountCents }),
-});
+      const webhookPath = path.join(apiDir, "webhook/route.ts");
+      await fs.ensureDir(path.dirname(webhookPath));
+      await fs.writeFile(webhookPath, webhookCode);
+      console.log(chalk.green(`✓ Created ${webhookPath}`));
+    } else {
+      // Pages Router
+      const webhookCode = `import type { NextApiRequest, NextApiResponse } from "next";
 
 /**
- * Usage in your agent endpoint:
+ * Portald Webhook Handler
  * 
- * const sessionToken = req.headers.authorization; // From Portald handshake
- * const result = await gatedChargeCustomer(sessionToken, "cus_123", 5000);
+ * This endpoint receives callbacks from Portald when agent actions are approved/denied.
+ * Register this URL in your Portald dashboard or include it in action requests.
+ * 
+ * URL: https://${domain}/api/portald/webhook
  */
-`;
+
+interface WebhookPayload {
+  event: "action.decided";
+  action_id: string;
+  status: "approved" | "denied" | "executed" | "failed";
+  action_type: string;
+  decided_at: string;
+  reason?: string;
+  payment_intent_id?: string;
+  payment_error?: string;
+  mediation_payload?: Record<string, unknown>;
 }
 
-function getExpressRoutes() {
-  return `import { Router } from "express";
-import { portaldClient } from "./client";
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-export const portaldRoutes = Router();
+  const body = req.body as WebhookPayload;
 
-portaldRoutes.post("/handshake", async (req, res) => {
-  const { action_code } = req.body;
-  if (!action_code) {
-    return res.status(400).json({ error: "Missing action_code" });
-  }
-  try {
-    const result = await portaldClient.handshake(action_code);
-    res.json(result);
-  } catch (error: any) {
-    res.status(401).json({ error: error.message });
-  }
-});
+  console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
 
-portaldRoutes.post("/actions", async (req, res) => {
-  const token = req.headers.authorization?.replace("Bearer ", "");
-  if (!token) {
-    return res.status(401).json({ error: "Unauthorized" });
+  // Handle the action based on type and status
+  if (body.status === "executed") {
+    // Payment was successful - fulfill the order
+    switch (body.action_type) {
+      case "purchase":
+        // TODO: Fulfill the purchase
+        // - Look up order by action_id
+        // - Mark as paid
+        // - Trigger shipping/delivery
+        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        break;
+      default:
+        console.log(\`Action executed: \${body.action_type}\`);
+    }
+  } else if (body.status === "approved") {
+    // Action approved but may not involve payment
+    console.log(\`Action approved: \${body.action_id}\`);
+  } else if (body.status === "denied") {
+    // User denied the action
+    console.log(\`Action denied: \${body.action_id}, reason: \${body.reason}\`);
+  } else if (body.status === "failed") {
+    // Payment or execution failed
+    console.log(\`Action failed: \${body.action_id}, error: \${body.payment_error}\`);
   }
-  try {
-    const result = await portaldClient.ingestAction(token, req.body);
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ error: error.message });
-  }
-});
 
-portaldRoutes.get("/actions/:id", async (req, res) => {
-  const token = req.headers.authorization?.replace("Bearer ", "");
-  if (!token) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  try {
-    const result = await portaldClient.getAction(token, req.params.id);
-    res.json(result);
-  } catch (error: any) {
-    res.status(400).json({ error: error.message });
-  }
-});
+  return res.json({ received: true });
+}
 `;
+      const webhookPath = path.join(apiDir, "webhook.ts");
+      await fs.ensureDir(path.dirname(webhookPath));
+      await fs.writeFile(webhookPath, webhookCode);
+      console.log(chalk.green(`✓ Created ${webhookPath}`));
+    }
+  } else if (framework === "express") {
+    const routeCode = `import { Router, Request, Response } from "express";
+
+/**
+ * Portald Webhook Handler
+ * 
+ * Mount this router: app.use("/api/portald", portaldRouter);
+ * 
+ * This endpoint receives callbacks from Portald when agent actions are approved/denied.
+ * URL: https://${domain}/api/portald/webhook
+ */
+
+interface WebhookPayload {
+  event: "action.decided";
+  action_id: string;
+  status: "approved" | "denied" | "executed" | "failed";
+  action_type: string;
+  decided_at: string;
+  reason?: string;
+  payment_intent_id?: string;
+  payment_error?: string;
+  mediation_payload?: Record<string, unknown>;
+}
+
+const router = Router();
+
+router.post("/webhook", async (req: Request, res: Response) => {
+  const body = req.body as WebhookPayload;
+
+  console.log(\`[Portald Webhook] \${body.event}: \${body.action_type} -> \${body.status}\`);
+
+  // Handle the action based on type and status
+  if (body.status === "executed") {
+    // Payment was successful - fulfill the order
+    switch (body.action_type) {
+      case "purchase":
+        // TODO: Fulfill the purchase
+        console.log(\`Purchase executed: \${body.action_id}, payment: \${body.payment_intent_id}\`);
+        break;
+      default:
+        console.log(\`Action executed: \${body.action_type}\`);
+    }
+  } else if (body.status === "approved") {
+    console.log(\`Action approved: \${body.action_id}\`);
+  } else if (body.status === "denied") {
+    console.log(\`Action denied: \${body.action_id}, reason: \${body.reason}\`);
+  } else if (body.status === "failed") {
+    console.log(\`Action failed: \${body.action_id}, error: \${body.payment_error}\`);
+  }
+
+  res.json({ received: true });
+});
+
+export default router;
+`;
+    const routePath = path.join(apiDir, "portald.ts");
+    await fs.ensureDir(path.dirname(routePath));
+    await fs.writeFile(routePath, routeCode);
+    console.log(chalk.green(`✓ Created ${routePath}`));
+  }
+
+  // Summary
+  console.log(chalk.bold("\n✨ Portald initialized!\n"));
+  console.log(chalk.white("Your site is now Portald-enabled. Here's what was created:\n"));
+  
+  console.log(chalk.cyan("  📄 Manifest"));
+  console.log(chalk.dim(`     ${manifestPath}`));
+  console.log(chalk.dim("     Agents discover your site supports Portald via this file.\n"));
+  
+  console.log(chalk.cyan("  🔔 Webhook Handler"));
+  console.log(chalk.dim(`     https://${domain}/api/portald/webhook`));
+  console.log(chalk.dim("     Receives notifications when actions are approved/executed.\n"));
+
+  console.log(chalk.white("How it works:\n"));
+  console.log(chalk.dim("  1. An AI agent discovers your site supports Portald (via manifest)"));
+  console.log(chalk.dim("  2. Agent submits purchase/action requests through Portald"));
+  console.log(chalk.dim("  3. User approves the action in their Portald dashboard"));
+  console.log(chalk.dim("  4. Portald executes payment and notifies your webhook"));
+  console.log(chalk.dim("  5. Your webhook handler fulfills the order\n"));
+
+  console.log(chalk.white("Next steps:\n"));
+  console.log(chalk.dim("  1. Deploy your site with the manifest at /.well-known/portald-manifest.json"));
+  console.log(chalk.dim("  2. Implement fulfillment logic in your webhook handler"));
+  console.log(chalk.dim("  3. (Optional) Set up Stripe Connect to receive funds directly"));
+  console.log(chalk.dim("     → https://portald.ai/docs/merchant-setup\n"));
 }

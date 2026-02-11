@@ -1,33 +1,131 @@
 import chalk from "chalk";
+import fs from "fs-extra";
+import path from "path";
 
-type WrapOptions = {
-  risk?: string;
+interface WrapOptions {
+  risk?: "low" | "med" | "high";
   actionType?: string;
-};
+}
 
 export async function wrap(functionName: string, options: WrapOptions) {
+  console.log(chalk.bold(`\n🔐 Portald - Wrap Function: ${functionName}\n`));
+
   const riskLevel = options.risk ?? "med";
-  const actionType = options.actionType ?? functionName.replace(/([A-Z])/g, ".$1").toLowerCase().replace(/^\./, "");
+  const actionType = options.actionType ?? functionName;
 
-  console.log(chalk.bold("\n📦 Portald Function Wrapper\n"));
-  console.log("Wrap your function like this:\n");
+  // Check if portald client exists
+  const clientPath = "src/lib/portald.ts";
+  if (!(await fs.pathExists(clientPath))) {
+    console.log(chalk.yellow("⚠ Portald client not found. Run 'portald init' first."));
+    process.exit(1);
+  }
 
-  console.log(chalk.dim("// Before"));
-  console.log(`async function ${functionName}(...args) {`);
-  console.log("  // your logic");
-  console.log("}\n");
+  const wrapperCode = `import { portald } from "@/lib/portald";
 
-  console.log(chalk.dim("// After"));
-  console.log(chalk.cyan(`import { gate } from "./lib/portald/gate";\n`));
-  console.log(`async function _${functionName}(...args) {`);
-  console.log("  // your logic");
-  console.log("}\n");
-  console.log(chalk.green(`export const ${functionName} = gate(_${functionName}, {`));
-  console.log(chalk.green(`  actionType: "${actionType}",`));
-  console.log(chalk.green(`  riskLevel: "${riskLevel}",`));
-  console.log(chalk.green(`  getPayload: (...args) => ({ args }),`));
-  console.log(chalk.green(`});`));
+/**
+ * Portald-wrapped ${functionName}
+ * Risk level: ${riskLevel}
+ * Action type: ${actionType}
+ * 
+ * This wrapper requests human approval before executing the function.
+ * - low risk: auto-approved
+ * - med/high risk: requires human approval via Portald dashboard
+ */
 
-  console.log(chalk.dim("\n// Usage"));
-  console.log(`const result = await ${functionName}(sessionToken, ...args);\n`);
+// TODO: Import your original function
+// import { ${functionName} as original${capitalize(functionName)} } from "./your-module";
+
+type ${capitalize(functionName)}Params = {
+  // TODO: Define your function parameters
+  [key: string]: unknown;
+};
+
+type ${capitalize(functionName)}Result = {
+  // TODO: Define your function result
+  success: boolean;
+  data?: unknown;
+  error?: string;
+};
+
+export async function ${functionName}Wrapped(
+  params: ${capitalize(functionName)}Params
+): Promise<${capitalize(functionName)}Result> {
+  // Request approval from Portald
+  const approval = await portald.requestAndWait({
+    actionType: "${actionType}",
+    payload: params,
+    riskLevel: "${riskLevel}",
+    reason: \`Requesting approval for ${functionName}\`,
+  });
+
+  if (!approval.approved) {
+    return {
+      success: false,
+      error: \`Action \${approval.status}: ${actionType} was not approved\`,
+    };
+  }
+
+  // Execute the original function
+  try {
+    // TODO: Call your original function
+    // const result = await original${capitalize(functionName)}(params);
+    // return { success: true, data: result };
+    
+    return { success: true, data: { message: "TODO: Implement original function" } };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
+}
+
+/**
+ * Non-blocking version that returns immediately after requesting approval.
+ * Use this with a webhook callback to handle the result asynchronously.
+ */
+export async function ${functionName}Async(
+  params: ${capitalize(functionName)}Params,
+  callbackUrl: string
+): Promise<{ actionId: string; status: string }> {
+  const result = await portald.requestApproval({
+    actionType: "${actionType}",
+    payload: params,
+    riskLevel: "${riskLevel}",
+    reason: \`Requesting approval for ${functionName}\`,
+    callbackUrl,
+  });
+
+  return {
+    actionId: result.actionId,
+    status: result.status,
+  };
+}
+`;
+
+  const outputDir = "src/lib/portald-wrapped";
+  const outputPath = path.join(outputDir, `${functionName}.ts`);
+
+  await fs.ensureDir(outputDir);
+  await fs.writeFile(outputPath, wrapperCode);
+
+  console.log(chalk.green(`✓ Created ${outputPath}`));
+  console.log();
+  console.log(chalk.white("Usage:"));
+  console.log(chalk.cyan(`
+  import { ${functionName}Wrapped } from "@/lib/portald-wrapped/${functionName}";
+  
+  // Blocking - waits for approval
+  const result = await ${functionName}Wrapped({ ... });
+  
+  // Non-blocking - uses webhook callback
+  import { ${functionName}Async } from "@/lib/portald-wrapped/${functionName}";
+  const { actionId } = await ${functionName}Async({ ... }, "https://your-site.com/api/portald/webhook");
+`));
+  console.log(chalk.dim("Don't forget to implement the original function call in the wrapper!"));
+  console.log();
+}
+
+function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
